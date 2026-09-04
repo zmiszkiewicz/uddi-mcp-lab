@@ -177,22 +177,44 @@ def find_branch_host(client):
     """
     The NIOS-X (or NIOS-X-as-a-Service) host serving the branch network.
 
-    Not created here — the host is part of the sandbox the broker hands us, or
-    it is stood up by the traffic-generator work (see traffic/README.md). If it
-    is absent the whole track is meaningless, so this raises rather than
-    quietly continuing.
+    Not created here — the host is part of the sandbox the broker hands us. We
+    first try the configured name, then auto-discover: if exactly one host
+    exists in the tenant it is almost certainly the branch host, so we use it
+    and log its name so the operator can pin LAB_BRANCH_HOST for future runs.
+    Zero or multiple hosts with no name match is a hard failure because there
+    is no safe way to guess which one to attach the DNS profile to.
     """
     host = (client.find_by_name(cfg.path("dns_host"), cfg.BRANCH_HOST_NAME)
             or client.find_by_name(cfg.path("dns_host"), cfg.BRANCH_HOST_NAME,
                                    field="absolute_name"))
-    if not host:
-        raise SystemExit(
-            f"❌ NIOS-X host {cfg.BRANCH_HOST_NAME!r} not found in this tenant.\n"
-            f"   Challenges 1-5 all depend on it. Check that the sandbox the "
-            f"broker allocated has a host deployed, or set LAB_BRANCH_HOST to "
-            f"the host that actually exists."
+    if host:
+        return host
+
+    # Not found by configured name — discover.
+    all_hosts = client.list_results(cfg.path("dns_host"))
+    if len(all_hosts) == 1:
+        host = all_hosts[0]
+        discovered_name = host.get("name") or host.get("absolute_name", "<unnamed>")
+        print(
+            f"⚠️  LAB_BRANCH_HOST={cfg.BRANCH_HOST_NAME!r} not matched; "
+            f"auto-selected the only host in this tenant: {discovered_name!r}.\n"
+            f"   Pin it for future runs: export LAB_BRANCH_HOST={discovered_name!r}",
+            flush=True,
         )
-    return host
+        return host
+
+    names = [h.get("name") or h.get("absolute_name", "<unnamed>") for h in all_hosts]
+    if all_hosts:
+        raise SystemExit(
+            f"❌ LAB_BRANCH_HOST={cfg.BRANCH_HOST_NAME!r} not found and there are "
+            f"{len(all_hosts)} hosts — cannot auto-select.\n"
+            f"   Set LAB_BRANCH_HOST to one of: {', '.join(names)}"
+        )
+    raise SystemExit(
+        f"❌ No DNS hosts found in this tenant at all.\n"
+        f"   The broker sandbox must have at least one NIOS-X host registered.\n"
+        f"   Check that allocation_subtenant.py succeeded and the sandbox is healthy."
+    )
 
 
 # --------------------------------------------------------------------------- #
