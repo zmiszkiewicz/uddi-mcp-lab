@@ -1,0 +1,13 @@
+# Claude on Amazon Bedrock. The bedrock extra brings the AnthropicBedrockMantle
+# client and its boto3/botocore dependency chain.
+anthropic[bedrock]>=0.116.0
+
+# The official MCP client. Used for the Streamable HTTP transport, session
+# handshake and tools/list + tools/call — Bedrock has no MCP connector, so the
+# agent speaks MCP itself. Requires Python 3.10+.
+mcp>=1.9.0
+
+# The chat tab.
+streamlit>=1.40.0
+
+requests>=2.31.0

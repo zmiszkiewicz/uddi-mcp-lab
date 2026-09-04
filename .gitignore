@@ -1,0 +1,13 @@
+# Per-run state written by the lifecycle scripts. Never commit any of it —
+# sandbox ids and user ids are tenant-identifying, and the key files are live
+# credentials.
+scripts/*.txt
+!scripts/requirements.txt
+scripts/seed_ids.json
+scripts/sandbox_env.sh
+scripts/user_credentials.sh
+scripts/jwt.txt
+
+__pycache__/
+*.pyc
+.DS_Store
