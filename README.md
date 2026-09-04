@@ -20,13 +20,29 @@ Full environment-variable reference, run order and open-questions punch list:
 ## What this does
 
 Puts a CSP sandbox into a deterministic broken state, verifies each challenge's
-end state, and cleans up after itself.
+end state, runs the agent the learner talks to, and cleans up after itself.
 
 ```
-seed_lab.py     baseline footprint → apply 4 breaks → ASSERT each one landed
-verify_lab.py   --stage c1..c5, reading the tenant only
-revoke_mcp_keys.py + teardown_lab.py    idempotent cleanup
+scripts/seed_lab.py    baseline footprint → apply 4 breaks → ASSERT each landed
+scripts/verify_lab.py  --stage c1..c5, reading the tenant only
+scripts/revoke_mcp_keys.py + teardown_lab.py   idempotent cleanup
+agent/                 Claude on Amazon Bedrock, driving the MCP server
 ```
+
+## The agent
+
+Claude runs on **Amazon Bedrock** in the Instruqt AWS sandbox account, served as
+a Streamlit chat tab on port 8501.
+
+Bedrock does not support the Claude API's `mcp_servers` connector, so the agent
+runs its own MCP client against `https://csp.infoblox.com/mcp`, converts the
+server's tools into Claude tool definitions, and drives the tool loop itself
+(`agent/bedrock_agent.py`). Each Infoblox call is rendered in the UI as it
+fires — that visibility is a teaching goal, not a debug aid.
+
+The agent re-reads its Service API key from `/opt/lab/mcp_key` on **every turn**,
+so the read-only → read/write handover at Challenge 3 and the swap back at
+Challenge 5 are enforced by CSP rather than promised by the assignment prose.
 
 ### The four breaks
 
@@ -65,9 +81,10 @@ estate. Do not edit these here; fix them upstream and re-copy.
 | `create_user.py` / `delete_user.py` | Older single-purpose variants |
 | `deploy_api_key.py` | Reference for `/v2/current_api_keys` |
 
-New code exists only where this track needs something they do not do: minting
-**two** keys against a **service** user, seeding a deterministic broken state,
-and asserting it.
+New code exists only where this track needs something they do not do: minting a
+key for **each of two role-scoped users** (CSP mints keys for the *calling*
+identity, so `provision_mcp_keys.py` signs in as each user to mint its own),
+seeding a deterministic broken state and asserting it, and running the agent.
 
 ---
 
@@ -98,12 +115,12 @@ range-overlap logic is correct, and it lists every CSP path still unconfirmed.
 
 ## Current state
 
-**Not runnable yet.** Control flow, ordering, idempotency and assertions are
-complete. A set of CSP REST paths and payload shapes still need confirming from
-the API docs and the MCP setup guide — they are `Todo` objects in
-`lab_config.PATHS`, and anything that tries to build a request from one raises
-`LabTodo` with the exact question, at the point of use. There is no path by
+DDI paths are confirmed against Infoblox's OpenAPI-generated Go client
+([universal-ddi-go-client](https://github.com/infobloxopen/universal-ddi-go-client)),
+not guessed. Five CSP paths remain unconfirmed and are `Todo` objects in
+`lab_config.PATHS`; anything that tries to build a request from one raises
+`LabTodo` with the exact question at the point of use, so there is no path by
 which this silently calls an invented endpoint.
 
-Run `./preflight.sh` for the current list, or see the punch list in
-[`../README.md`](../README.md).
+Run `scripts/preflight.sh` for the current list. Full punch list and the
+remaining infrastructure prerequisites: the track README.
