@@ -113,9 +113,42 @@ AGENT_PORT = int(os.environ.get("AGENT_PORT", "8501"))
 # Where the agent writes generated charts. Challenge 4's check looks here.
 ARTIFACT_DIR = os.environ.get("LAB_ARTIFACT_DIR", "/opt/lab/artifacts")
 
-# CSP group names carrying the MCP read-only and read/write roles. Overridable
-# so the lab can be fixed without a code change once the real names are known
-# (TODO-02).
+# CSP groups assigned to each MCP user.
+#
+# Confirmed from a live sandbox. The tenant follows a consistent
+# `ib-<service>-admin` / `ib-<service>-user` convention (ib-ddi-admin /
+# ib-ddi-user, ib-td-admin / ib-td-user, and so on), and the MCP pair is
+# ib-mcp-server-admin / ib-mcp-server-user.
+#
+# THREE groups per user, not one. An MCP-server role gates access to the MCP
+# server itself; it does not grant permission to read DNS, DHCP or IPAM data.
+# Without the matching ib-ddi-* role the connection succeeds and then every
+# tool call comes back empty or denied — which looks exactly like a broken lab.
+#
+#   user                  base group every CSP user needs (create_user.py
+#                         assigns it too)
+#   ib-mcp-server-user    read-only access to the MCP Server
+#   ib-ddi-user           read-only access to the DDI data behind it
+#
+# Deliberately NOT act_admin: an account-admin read-only user would make the
+# Challenge 5 RBAC exercise meaningless.
+#
+# Comma-separated, overridable. Names that do not exist in a given sandbox are
+# skipped with a warning rather than being fatal, so a tenant with a slightly
+# different group set still comes up.
+MCP_RO_GROUPS = [
+    g.strip() for g in os.environ.get(
+        "MCP_RO_GROUPS", "user,ib-mcp-server-user,ib-ddi-user"
+    ).split(",") if g.strip()
+]
+MCP_RW_GROUPS = [
+    g.strip() for g in os.environ.get(
+        "MCP_RW_GROUPS", "user,ib-mcp-server-admin,ib-ddi-admin"
+    ).split(",") if g.strip()
+]
+
+# Single-name overrides, kept for the Instruqt secrets already documented. If
+# set, each replaces just the MCP-server group in the corresponding list.
 MCP_RO_GROUP = os.environ.get("MCP_RO_GROUP")
 MCP_RW_GROUP = os.environ.get("MCP_RW_GROUP")
 

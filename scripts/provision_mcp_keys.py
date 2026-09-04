@@ -56,6 +56,8 @@ ROLES = {
     "read_only": {
         "label": "read-only",
         "user_prefix": "mcp-ro",
+        "groups": cfg.MCP_RO_GROUPS,
+        "group_override": cfg.MCP_RO_GROUP,
         "group_env": "MCP_RO_GROUP",
         "key_state": "mcp_ro_key",
         "key_id_state": "mcp_ro_key_id",
@@ -63,6 +65,8 @@ ROLES = {
     "read_write": {
         "label": "read/write",
         "user_prefix": "mcp-rw",
+        "groups": cfg.MCP_RW_GROUPS,
+        "group_override": cfg.MCP_RW_GROUP,
         "group_env": "MCP_RW_GROUP",
         "key_state": "mcp_rw_key",
         "key_id_state": "mcp_rw_key_id",
@@ -85,30 +89,28 @@ def generate_password(length=16):
     return "".join(chars)
 
 
-def discover_group(groups, role):
+def discover_mcp_group(groups, role):
     """
-    Guess which CSP group carries an MCP role, from the group names present.
+    Fall back to guessing which group carries an MCP role, if the configured
+    name is not in this sandbox.
 
-    TODO-02 — nobody has told us the literal names yet. Rather than block the
-    whole track on that, look for an unambiguous match: a group mentioning MCP
-    whose name also indicates the right side of the read/write split.
-
-    Deliberately conservative. A single unambiguous candidate is used; zero or
-    several means we do NOT guess, because binding the read-only key to a group
-    that can actually write would silently break the Challenge 5 RBAC exercise
-    and quietly hand the agent write access for the whole track. Wrong here is
-    much worse than absent.
+    Only used when the default or overridden name is absent — a tenant with a
+    different naming convention. Deliberately conservative: zero or several
+    candidates means we do NOT guess, because binding the read-only key to a
+    group that can write would hand the agent write access for the whole track
+    and silently break the Challenge 5 RBAC exercise. Wrong is much worse than
+    absent.
     """
-    write_words = ("write", "readwrite", "read_write", "rw", "admin", "edit")
-    read_words = ("readonly", "read_only", "read-only", "read", "ro", "view")
+    write_words = ("admin", "write", "readwrite", "read_write", "read-write", "rw")
+    read_words = ("user", "readonly", "read_only", "read-only", "read", "view", "ro")
 
     candidates = []
     for name, gid in groups.items():
         if not name or "mcp" not in name.lower():
             continue
         lowered = name.lower()
-        looks_write = any(word in lowered for word in write_words)
-        looks_read = any(word in lowered for word in read_words)
+        looks_write = any(w in lowered for w in write_words)
+        looks_read = any(w in lowered for w in read_words)
 
         if role == "read_write" and looks_write:
             candidates.append((name, gid))
@@ -120,74 +122,94 @@ def discover_group(groups, role):
 
 def resolve_role_groups(admin):
     """
-    Map the read-only and read/write MCP roles onto CSP group ids.
+    Resolve each role to the list of CSP group ids its user should be in.
 
-    Order of preference:
-      1. MCP_RO_GROUP / MCP_RW_GROUP, if set. Always wins — an explicit name is
-         the only thing we fully trust.
-      2. An unambiguous match among the groups this sandbox actually has.
-      3. Fail, printing every group that exists so the right names can be read
-         straight off the setup log and pinned via the env vars.
+    Each role needs THREE groups, not one: the base `user` group, an
+    ib-mcp-server-* group granting access to the MCP Server, and an ib-ddi-*
+    group granting access to the data behind it. An MCP role on its own gates
+    the connection but not the data, so a user with only that would connect
+    successfully and then have every tool call come back empty — which reads as
+    a broken lab rather than a permissions problem.
 
-    Whatever it resolves to is logged, because "which group did the read-only
-    key end up bound to" is the difference between the RBAC lesson working and
-    the lab quietly lying to the learner.
+    Missing non-MCP groups are a warning, not an error: a tenant with a
+    slightly different group set should still come up. A missing MCP group IS
+    fatal, because without it the server refuses the connection outright and
+    Challenge 1 cannot pass.
     """
     groups = {row.get("name"): row.get("id")
               for row in admin.list_results(cfg.path("groups"))}
 
     resolved = {}
-    missing = []
+    fatal = []
     for role, spec in ROLES.items():
-        override = getattr(cfg, spec["group_env"])
+        wanted = list(spec["groups"])
 
-        if override:
-            if override not in groups:
-                missing.append(
-                    f"{spec['group_env']}={override!r} does not exist in this "
-                    f"sandbox"
-                )
+        # A single-name override replaces just the MCP-server entry.
+        if spec["group_override"]:
+            wanted = [spec["group_override"] if "mcp" in g.lower() else g
+                      for g in wanted]
+            if not any("mcp" in g.lower() for g in wanted):
+                wanted.append(spec["group_override"])
+
+        ids, names, mcp_ok = [], [], False
+        for name in wanted:
+            gid = groups.get(name)
+
+            if gid is None and "mcp" in name.lower():
+                guess = discover_mcp_group(groups, role)
+                if guess:
+                    name, gid = guess
+                    info(f"    {spec['label']}: MCP group auto-discovered as "
+                         f"{name}")
+
+            if gid is None:
+                if "mcp" in name.lower():
+                    fatal.append(
+                        f"the MCP {spec['label']} group {name!r} does not exist "
+                        f"in this sandbox — set {spec['group_env']}"
+                    )
+                else:
+                    print(f"⚠️  {spec['label']}: group {name!r} not found in this "
+                          f"sandbox, skipping", flush=True)
                 continue
-            resolved[role] = groups[override]
-            ok(f"MCP {spec['label']} role: {override} (pinned via "
-               f"{spec['group_env']})")
-            continue
 
-        guess = discover_group(groups, role)
-        if guess:
-            name, gid = guess
-            resolved[role] = gid
-            ok(f"MCP {spec['label']} role: {name} (auto-discovered)")
-            info(f"    pin this with {spec['group_env']} if it is wrong")
-        else:
-            missing.append(
-                f"could not identify the group carrying the MCP "
-                f"{spec['label']} role — set {spec['group_env']}"
+            ids.append(gid)
+            names.append(name)
+            if "mcp" in name.lower():
+                mcp_ok = True
+
+        if not mcp_ok and not any(f.startswith("the MCP") for f in fatal):
+            fatal.append(
+                f"no MCP group resolved for the {spec['label']} role — "
+                f"set {spec['group_env']}"
             )
 
-    if missing:
+        resolved[role] = ids
+        ok(f"MCP {spec['label']} user groups: {', '.join(names) or '(none)'}")
+
+    if fatal:
         raise SystemExit(
             "❌ Could not resolve the MCP role groups (TODO-02):\n"
-            + "".join(f"   - {m}\n" for m in missing)
+            + "".join(f"   - {m}\n" for m in fatal)
             + "\n   Groups that DO exist in this sandbox:\n"
             + "".join(f"     {n}\n" for n in sorted(g for g in groups if g))
-            + "\n   Set the right names as Instruqt team secrets and re-run:\n"
-              "     instruqt secrets create --name MCP_RO_GROUP --value '<name>'\n"
-              "     instruqt secrets create --name MCP_RW_GROUP --value '<name>'\n"
-              "   then add them back to config.yml under `secrets:`.\n"
-              "\n   Without an MCP Server role the server refuses the connection "
-              "outright, so Challenge 1 cannot pass."
+            + "\n   Override with comma-separated lists if the convention "
+              "differs:\n"
+              "     MCP_RO_GROUPS=user,ib-mcp-server-user,ib-ddi-user\n"
+              "     MCP_RW_GROUPS=user,ib-mcp-server-admin,ib-ddi-admin\n"
+            + "\n   Without an MCP Server role the server refuses the "
+              "connection outright, so Challenge 1 cannot pass."
         )
     return resolved
 
 
-def ensure_user(admin, name, email, group_id, password):
+def ensure_user(admin, name, email, group_ids, password):
     """
     Create one MCP user in one group. Idempotent — a re-run finds the existing
     user by name rather than creating a second.
 
     Mirrors the estate's user_provision.py, including the 409-means-it-exists
-    handling, but with a single role group instead of user+act_admin.
+    handling, but with the role-scoped groups above instead of user+act_admin.
     """
     existing = admin.find_by_name(cfg.path("users"), name)
     if existing:
@@ -198,7 +220,7 @@ def ensure_user(admin, name, email, group_id, password):
             "name": name,
             "email": email,
             "type": "interactive",
-            "group_ids": [group_id],
+            "group_ids": group_ids,
         })
         user_id = created.get("result", {}).get("id", "").split("/")[-1]
         if not user_id:
@@ -321,7 +343,8 @@ def main():
             email = f"{name}@{cfg.USER_DOMAIN}"
             password = generate_password()
 
-            user_id = ensure_user(admin, name, email, role_groups[role], password)
+            user_id = ensure_user(admin, name, email,
+                                  role_groups[role], password)
             key_id, key = mint_key_as_user(email, password, account_id,
                                            spec["label"])
 
