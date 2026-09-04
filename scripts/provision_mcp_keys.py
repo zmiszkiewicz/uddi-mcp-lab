@@ -85,18 +85,53 @@ def generate_password(length=16):
     return "".join(chars)
 
 
+def discover_group(groups, role):
+    """
+    Guess which CSP group carries an MCP role, from the group names present.
+
+    TODO-02 — nobody has told us the literal names yet. Rather than block the
+    whole track on that, look for an unambiguous match: a group mentioning MCP
+    whose name also indicates the right side of the read/write split.
+
+    Deliberately conservative. A single unambiguous candidate is used; zero or
+    several means we do NOT guess, because binding the read-only key to a group
+    that can actually write would silently break the Challenge 5 RBAC exercise
+    and quietly hand the agent write access for the whole track. Wrong here is
+    much worse than absent.
+    """
+    write_words = ("write", "readwrite", "read_write", "rw", "admin", "edit")
+    read_words = ("readonly", "read_only", "read-only", "read", "ro", "view")
+
+    candidates = []
+    for name, gid in groups.items():
+        if not name or "mcp" not in name.lower():
+            continue
+        lowered = name.lower()
+        looks_write = any(word in lowered for word in write_words)
+        looks_read = any(word in lowered for word in read_words)
+
+        if role == "read_write" and looks_write:
+            candidates.append((name, gid))
+        elif role == "read_only" and looks_read and not looks_write:
+            candidates.append((name, gid))
+
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def resolve_role_groups(admin):
     """
     Map the read-only and read/write MCP roles onto CSP group ids.
 
-    TODO-02 — the literal group names are the remaining unknown. PTCI-4674
-    describes the read vs. write split for MCP Server access; this needs the
-    exact strings GET /v2/groups returns. Set MCP_RO_GROUP and MCP_RW_GROUP to
-    fix the lab without a code change.
+    Order of preference:
+      1. MCP_RO_GROUP / MCP_RW_GROUP, if set. Always wins — an explicit name is
+         the only thing we fully trust.
+      2. An unambiguous match among the groups this sandbox actually has.
+      3. Fail, printing every group that exists so the right names can be read
+         straight off the setup log and pinned via the env vars.
 
-    If a name is missing this raises with the full list of groups that DO exist
-    in the sandbox, which is the fastest way to discover the right names — run
-    setup once and read the error.
+    Whatever it resolves to is logged, because "which group did the read-only
+    key end up bound to" is the difference between the RBAC lesson working and
+    the lab quietly lying to the learner.
     """
     groups = {row.get("name"): row.get("id")
               for row in admin.list_results(cfg.path("groups"))}
@@ -104,28 +139,43 @@ def resolve_role_groups(admin):
     resolved = {}
     missing = []
     for role, spec in ROLES.items():
-        name = getattr(cfg, spec["group_env"])
-        if not name:
-            missing.append(
-                f"{spec['group_env']} is unset — set it to the CSP group "
-                f"carrying the MCP {spec['label']} role"
-            )
+        override = getattr(cfg, spec["group_env"])
+
+        if override:
+            if override not in groups:
+                missing.append(
+                    f"{spec['group_env']}={override!r} does not exist in this "
+                    f"sandbox"
+                )
+                continue
+            resolved[role] = groups[override]
+            ok(f"MCP {spec['label']} role: {override} (pinned via "
+               f"{spec['group_env']})")
             continue
-        if name not in groups:
+
+        guess = discover_group(groups, role)
+        if guess:
+            name, gid = guess
+            resolved[role] = gid
+            ok(f"MCP {spec['label']} role: {name} (auto-discovered)")
+            info(f"    pin this with {spec['group_env']} if it is wrong")
+        else:
             missing.append(
-                f"{spec['group_env']}={name!r} does not exist in this sandbox"
+                f"could not identify the group carrying the MCP "
+                f"{spec['label']} role — set {spec['group_env']}"
             )
-            continue
-        resolved[role] = groups[name]
-        info(f"MCP {spec['label']} role {name} -> {groups[name]}")
 
     if missing:
         raise SystemExit(
             "❌ Could not resolve the MCP role groups (TODO-02):\n"
             + "".join(f"   - {m}\n" for m in missing)
-            + "   Groups that DO exist in this sandbox:\n"
+            + "\n   Groups that DO exist in this sandbox:\n"
             + "".join(f"     {n}\n" for n in sorted(g for g in groups if g))
-            + "   Without an MCP Server role the server refuses the connection "
+            + "\n   Set the right names as Instruqt team secrets and re-run:\n"
+              "     instruqt secrets create --name MCP_RO_GROUP --value '<name>'\n"
+              "     instruqt secrets create --name MCP_RW_GROUP --value '<name>'\n"
+              "   then add them back to config.yml under `secrets:`.\n"
+              "\n   Without an MCP Server role the server refuses the connection "
               "outright, so Challenge 1 cannot pass."
         )
     return resolved
